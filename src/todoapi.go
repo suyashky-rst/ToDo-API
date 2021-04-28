@@ -7,11 +7,18 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
-	"strconv"
 
+	"github.com/dgrijalva/jwt-go"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
+
+var jwtKey = []byte("loremipsum")
+
+type Claims struct {
+	Username string `json:"username"`
+	jwt.StandardClaims
+}
 
 type User struct {
 	Username string `json:"username"`
@@ -28,7 +35,7 @@ const (
 	host     = "localhost"
 	port     = 5432
 	user     = "postgres"
-	password = ""
+	password = "simple"
 	dbname   = "postgres"
 )
 
@@ -64,8 +71,22 @@ func OpenConnection() *sql.DB {
 
 func GetTodos(w http.ResponseWriter, r *http.Request) {
 
-	urlEnd := filepath.Base(r.URL.Path)
-	userId, err := strconv.Atoi(urlEnd)
+	userName := filepath.Base(r.URL.Path)
+
+	// get id of given username
+	var userId int
+	getUserId := `SELECT id FROM users WHERE username=$1`
+	err := db.QueryRow(getUserId, userName).Scan(&userId)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "User does not exists!", http.StatusBadRequest)
+			return
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			panic(err)
+		}
+	}
 
 	query := "SELECT id, title, description FROM todos WHERE userid=$1"
 	rows, err := db.Query(query, userId)
@@ -98,13 +119,23 @@ func CreateTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	urlEnd := filepath.Base(r.URL.Path)
-	userId, err := strconv.Atoi(urlEnd)
+	userName := filepath.Base(r.URL.Path)
+
+	// get id of given username
+	var userId int
+	getUserId := `SELECT id FROM users WHERE username=$1`
+	err = db.QueryRow(getUserId, userName).Scan(&userId)
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		if err == sql.ErrNoRows {
+			http.Error(w, "User does not exists!", http.StatusBadRequest)
+			return
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			panic(err)
+		}
 	}
+
 	sqlStatement := `INSERT INTO todos (title, description, userid) VALUES ($1, $2, $3)`
 	_, err = db.Exec(sqlStatement, t.Title, t.Description, userId)
 
@@ -139,9 +170,10 @@ func LogIn(w http.ResponseWriter, r *http.Request) {
 			panic(err)
 		}
 	} else if !CheckPasswordHash(u.Password, passwdHash) {
-		http.Error(w, "Incorrect password!", http.StatusBadRequest)
+		http.Error(w, "Incorrect password!", http.StatusUnauthorized)
 		return
 	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
