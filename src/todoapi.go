@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/dgrijalva/jwt-go"
 	_ "github.com/lib/pq"
@@ -71,12 +72,52 @@ func OpenConnection() *sql.DB {
 
 func GetTodos(w http.ResponseWriter, r *http.Request) {
 
+	// CASE-> when there is no "token" cookie -> Unauthorized
+	c, err := r.Cookie("token")
+	if err != nil {
+		if err == http.ErrNoCookie {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// CASE-> when there is A "token" cookie-> check if still valid
+	// can be invalid if 1. time expired 2. signature does not matches
+
+	tknStr := c.Value
+	claims := &Claims{}
+
+	tkn, err := jwt.ParseWithClaims(tknStr, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+
+	if err != nil {
+		// signature mismatch
+		if err == jwt.ErrSignatureInvalid {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// OR any other error
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	userName := filepath.Base(r.URL.Path)
+
+	// time expired OR token valid but for different user
+	if !tkn.Valid || claims.Username != userName {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// authorized now
 
 	// get id of given username
 	var userId int
 	getUserId := `SELECT id FROM users WHERE username=$1`
-	err := db.QueryRow(getUserId, userName).Scan(&userId)
+	err = db.QueryRow(getUserId, userName).Scan(&userId)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -111,15 +152,56 @@ func GetTodos(w http.ResponseWriter, r *http.Request) {
 
 func CreateTodo(w http.ResponseWriter, r *http.Request) {
 
+	// CASE-> when there is no "token" cookie -> Unauthorized
+	c, err := r.Cookie("token")
+	if err != nil {
+		if err == http.ErrNoCookie {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// CASE-> when there is A "token" cookie-> check if still valid
+	// can be invalid if 1. time expired 2. signature does not matches
+
+	tknStr := c.Value
+	claims := &Claims{}
+
+	tkn, err := jwt.ParseWithClaims(tknStr, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+
+	if err != nil {
+		// signature mismatch
+		if err == jwt.ErrSignatureInvalid {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// OR any other error
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	userName := filepath.Base(r.URL.Path)
+
+	// time expired OR token valid but for different user
+	if !tkn.Valid || claims.Username != userName {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// authorized now
+
+	// extract todo info
 	var t Todo
-	err := json.NewDecoder(r.Body).Decode(&t)
+	err = json.NewDecoder(r.Body).Decode(&t)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	userName := filepath.Base(r.URL.Path)
 
 	// get id of given username
 	var userId int
@@ -173,6 +255,33 @@ func LogIn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Incorrect password!", http.StatusUnauthorized)
 		return
 	}
+
+	// authorised here
+
+	// set username, expiration time
+	expirationTime := time.Now().Add(1 * time.Minute)
+	claims := &Claims{
+		Username: u.Username,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: expirationTime.Unix(),
+		},
+	}
+
+	//generate token with above claims
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// get token string using signature
+	tokenString, err := token.SignedString(jwtKey)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// store token info to cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:    "token",
+		Value:   tokenString,
+		Expires: expirationTime,
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
