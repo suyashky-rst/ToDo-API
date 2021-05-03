@@ -70,54 +70,62 @@ func OpenConnection() *sql.DB {
 	return db
 }
 
+// it will run authentication code
+// then run the handler func given in its argument
+func AuthRequired(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// authentication code
+		// CASE-> when there is no "token" cookie -> Unauthorized
+		c, err := r.Cookie("token")
+		if err != nil {
+			if err == http.ErrNoCookie {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// CASE-> when there is A "token" cookie-> check if still valid
+		// can be invalid if 1. time expired 2. signature does not matches
+
+		tknStr := c.Value
+		claims := &Claims{}
+
+		tkn, err := jwt.ParseWithClaims(tknStr, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtKey, nil
+		})
+
+		if err != nil {
+			// signature mismatch
+			if err == jwt.ErrSignatureInvalid {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			// OR any other error
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// time expired OR token valid but for different user
+		if !tkn.Valid || claims.Username != filepath.Base(r.URL.Path) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// authorized now --------------------
+
+		handler.ServeHTTP(w, r)
+	}
+}
+
 func GetTodos(w http.ResponseWriter, r *http.Request) {
 
-	// CASE-> when there is no "token" cookie -> Unauthorized
-	c, err := r.Cookie("token")
-	if err != nil {
-		if err == http.ErrNoCookie {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	// CASE-> when there is A "token" cookie-> check if still valid
-	// can be invalid if 1. time expired 2. signature does not matches
-
-	tknStr := c.Value
-	claims := &Claims{}
-
-	tkn, err := jwt.ParseWithClaims(tknStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return jwtKey, nil
-	})
-
-	if err != nil {
-		// signature mismatch
-		if err == jwt.ErrSignatureInvalid {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		// OR any other error
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
 	userName := filepath.Base(r.URL.Path)
-
-	// time expired OR token valid but for different user
-	if !tkn.Valid || claims.Username != userName {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	// authorized now
 
 	// get id of given username
 	var userId int
 	getUserId := `SELECT id FROM users WHERE username=$1`
-	err = db.QueryRow(getUserId, userName).Scan(&userId)
+	err := db.QueryRow(getUserId, userName).Scan(&userId)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -152,51 +160,11 @@ func GetTodos(w http.ResponseWriter, r *http.Request) {
 
 func CreateTodo(w http.ResponseWriter, r *http.Request) {
 
-	// CASE-> when there is no "token" cookie -> Unauthorized
-	c, err := r.Cookie("token")
-	if err != nil {
-		if err == http.ErrNoCookie {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	// CASE-> when there is A "token" cookie-> check if still valid
-	// can be invalid if 1. time expired 2. signature does not matches
-
-	tknStr := c.Value
-	claims := &Claims{}
-
-	tkn, err := jwt.ParseWithClaims(tknStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return jwtKey, nil
-	})
-
-	if err != nil {
-		// signature mismatch
-		if err == jwt.ErrSignatureInvalid {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		// OR any other error
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
 	userName := filepath.Base(r.URL.Path)
-
-	// time expired OR token valid but for different user
-	if !tkn.Valid || claims.Username != userName {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	// authorized now
 
 	// extract todo info
 	var t Todo
-	err = json.NewDecoder(r.Body).Decode(&t)
+	err := json.NewDecoder(r.Body).Decode(&t)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -286,6 +254,12 @@ func LogIn(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func PanicError(e error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 func SignUp(w http.ResponseWriter, r *http.Request) {
 	var u User
 	err := json.NewDecoder(r.Body).Decode(&u)
@@ -296,9 +270,7 @@ func SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u.Password, err = HashPassword(u.Password)
-	if err != nil {
-		panic(err)
-	}
+	PanicError(err)
 
 	sqlStatement := `INSERT INTO users (username, password) VALUES ($1, $2)`
 	_, err = db.Exec(sqlStatement, u.Username, u.Password)
@@ -315,10 +287,10 @@ func initiate() {
 	db = OpenConnection()
 	defer db.Close()
 
-	http.HandleFunc("/get-todos/", GetTodos)     // get
-	http.HandleFunc("/signup", SignUp)           // post
-	http.HandleFunc("/login", LogIn)             // post
-	http.HandleFunc("/create-todo/", CreateTodo) // post
+	http.HandleFunc("/get-todos/", AuthRequired(GetTodos))     // get
+	http.HandleFunc("/signup", SignUp)                         // post
+	http.HandleFunc("/login", LogIn)                           // post
+	http.HandleFunc("/create-todo/", AuthRequired(CreateTodo)) // post
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
