@@ -33,11 +33,11 @@ type Todo struct {
 }
 
 const (
-	host     = "localhost"
-	port     = 5432
-	user     = "postgres"
-	password = "simple"
-	dbname   = "postgres"
+	host     = ""
+	port     = 
+	user     = ""
+	password = ""
+	dbname   = ""
 )
 
 func HashPassword(pass string) (string, error) {
@@ -50,6 +50,12 @@ func CheckPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
+func PanicError(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
+
 var db *sql.DB
 
 func OpenConnection() *sql.DB {
@@ -58,24 +64,16 @@ func OpenConnection() *sql.DB {
 		host, port, user, password, dbname)
 
 	db, err := sql.Open("postgres", psqlInfo)
-	if err != nil {
-		panic(err)
-	}
+	PanicError(err)
 
 	err = db.Ping()
-	if err != nil {
-		panic(err)
-	}
+	PanicError(err)
 
 	return db
 }
 
-// it will run authentication code
-// then run the handler func given in its argument
 func AuthRequired(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// authentication code
-		// CASE-> when there is no "token" cookie -> Unauthorized
 		c, err := r.Cookie("token")
 		if err != nil {
 			if err == http.ErrNoCookie {
@@ -86,9 +84,6 @@ func AuthRequired(handler http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// CASE-> when there is A "token" cookie-> check if still valid
-		// can be invalid if 1. time expired 2. signature does not matches
-
 		tknStr := c.Value
 		claims := &Claims{}
 
@@ -97,22 +92,18 @@ func AuthRequired(handler http.HandlerFunc) http.HandlerFunc {
 		})
 
 		if err != nil {
-			// signature mismatch
 			if err == jwt.ErrSignatureInvalid {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			// OR any other error
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		// time expired OR token valid but for different user
 		if !tkn.Valid || claims.Username != filepath.Base(r.URL.Path) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		// authorized now --------------------
 
 		handler.ServeHTTP(w, r)
 	}
@@ -122,23 +113,8 @@ func GetTodos(w http.ResponseWriter, r *http.Request) {
 
 	userName := filepath.Base(r.URL.Path)
 
-	// get id of given username
-	var userId int
-	getUserId := `SELECT id FROM users WHERE username=$1`
-	err := db.QueryRow(getUserId, userName).Scan(&userId)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			http.Error(w, "User does not exists!", http.StatusBadRequest)
-			return
-		} else {
-			w.WriteHeader(http.StatusBadRequest)
-			panic(err)
-		}
-	}
-
-	query := "SELECT id, title, description FROM todos WHERE userid=$1"
-	rows, err := db.Query(query, userId)
+	query := "SELECT id, title, description FROM todos WHERE userid in (SELECT id FROM users WHERE username=$1)"
+	rows, err := db.Query(query, userName)
 
 	if err != nil {
 		panic(err)
@@ -160,9 +136,6 @@ func GetTodos(w http.ResponseWriter, r *http.Request) {
 
 func CreateTodo(w http.ResponseWriter, r *http.Request) {
 
-	userName := filepath.Base(r.URL.Path)
-
-	// extract todo info
 	var t Todo
 	err := json.NewDecoder(r.Body).Decode(&t)
 
@@ -171,23 +144,9 @@ func CreateTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// get id of given username
-	var userId int
-	getUserId := `SELECT id FROM users WHERE username=$1`
-	err = db.QueryRow(getUserId, userName).Scan(&userId)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			http.Error(w, "User does not exists!", http.StatusBadRequest)
-			return
-		} else {
-			w.WriteHeader(http.StatusBadRequest)
-			panic(err)
-		}
-	}
-
-	sqlStatement := `INSERT INTO todos (title, description, userid) VALUES ($1, $2, $3)`
-	_, err = db.Exec(sqlStatement, t.Title, t.Description, userId)
+	userName := filepath.Base(r.URL.Path)
+	sqlStatement := `INSERT INTO todos (title, description, userid) VALUES ($1, $2, (SELECT id FROM users WHERE username=$3))`
+	_, err = db.Exec(sqlStatement, t.Title, t.Description, userName)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -224,9 +183,6 @@ func LogIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// authorised here
-
-	// set username, expiration time
 	expirationTime := time.Now().Add(1 * time.Minute)
 	claims := &Claims{
 		Username: u.Username,
@@ -235,16 +191,13 @@ func LogIn(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	//generate token with above claims
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	// get token string using signature
 	tokenString, err := token.SignedString(jwtKey)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	// store token info to cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:    "token",
 		Value:   tokenString,
@@ -252,12 +205,6 @@ func LogIn(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.WriteHeader(http.StatusOK)
-}
-
-func PanicError(e error) {
-	if err != nil {
-		panic(err)
-	}
 }
 
 func SignUp(w http.ResponseWriter, r *http.Request) {
@@ -287,10 +234,10 @@ func initiate() {
 	db = OpenConnection()
 	defer db.Close()
 
-	http.HandleFunc("/get-todos/", AuthRequired(GetTodos))     // get
-	http.HandleFunc("/signup", SignUp)                         // post
-	http.HandleFunc("/login", LogIn)                           // post
-	http.HandleFunc("/create-todo/", AuthRequired(CreateTodo)) // post
+	http.HandleFunc("/get-todos/", AuthRequired(GetTodos))
+	http.HandleFunc("/signup", SignUp)
+	http.HandleFunc("/login", LogIn)
+	http.HandleFunc("/create-todo/", AuthRequired(CreateTodo))
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
